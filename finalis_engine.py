@@ -397,10 +397,29 @@ class FinalisEngine:
         implied_remaining_after_advance = implied_remaining_after_credit - advance_fees_created
 
         if is_payg:
-            # Pay-As-You-Go: ALL implied becomes commissions
-            finalis_commissions_before_cap = implied_total
-            new_commissions_mode = True
-            entered_commissions_mode = False
+            # Pay-As-You-Go: Check if ARR is already covered
+            arr = Decimal(str(contract.get('annual_subscription', 0)))
+            payg_accumulated = Decimal(str(state.get('payg_commissions_accumulated', 0)))
+
+            # Calculate how much of THIS deal's implied goes to ARR vs Finalis
+            remaining_arr = max(Decimal('0'), arr - payg_accumulated)
+
+            if implied_total <= remaining_arr:
+                # All implied goes to ARR (not Finalis yet)
+                finalis_commissions_before_cap = Decimal('0')
+                new_commissions_mode = False
+                entered_commissions_mode = False
+            elif payg_accumulated >= arr:
+                # ARR already covered - all implied becomes Finalis commissions
+                finalis_commissions_before_cap = implied_total
+                new_commissions_mode = True
+                entered_commissions_mode = False
+            else:
+                # Partial: some to ARR, rest to Finalis
+                finalis_commissions_before_cap = implied_total - remaining_arr
+                new_commissions_mode = True
+                entered_commissions_mode = True  # Just entered commissions mode
+
         elif is_in_commissions_mode:
             # CASE 1: Already in commissions mode
             finalis_commissions_before_cap = implied_total

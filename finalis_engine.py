@@ -208,10 +208,12 @@ class FinalisEngine:
 
     
 
-    def apply_cost_cap(self, finalis_commissions: Decimal, contract: Dict[str,
-                                                                          Any],
-                       state: Dict[str, Any], advance_fees_created: Decimal,
-                       deal_date: str) -> tuple[Decimal, Decimal]:
+    def apply_cost_cap(self, finalis_commissions: Decimal, 
+           implied_total_before_subscription: Decimal,  # NUEVO parámetro
+           contract: Dict[str, Any],
+           state: Dict[str, Any], 
+           advance_fees_created: Decimal,
+           deal_date: str) -> tuple[Decimal, Decimal]:
         """
         Apply cost cap limits to finalis commissions.
     
@@ -221,49 +223,52 @@ class FinalisEngine:
         - Si es "total": compara contra total_paid_all_time
         - Advance fees tienen prioridad, commissions se limitan si exceden el cap
     
+        IMPORTANTE PARA PAYG:
+        - amount_not_charged debe calcularse desde el implied_total ORIGINAL (antes de restar subscription)
+    
         Returns: (finalis_commissions_after_cap, amount_not_charged)
         """
         # Check if cost cap exists
-        cost_cap_type = contract.get(
-            'cost_cap_type')  # "annual", "total", or None
+        cost_cap_type = contract.get('cost_cap_type')  # "annual", "total", or None
         cost_cap_amount = contract.get('cost_cap_amount')
-
+    
         if cost_cap_type is None or cost_cap_amount is None:
-            # No cost cap - return original amount
+        # No cost cap - return original amount
             return finalis_commissions, Decimal('0')
-
+    
         cost_cap_amount_decimal = Decimal(str(cost_cap_amount))
-
+    
         # Get the appropriate tracking amount based on cap type
         if cost_cap_type == "annual":
-            total_paid = Decimal(
-                str(state.get('total_paid_this_contract_year', 0)))
+            total_paid = Decimal(str(state.get('total_paid_this_contract_year', 0)))
         elif cost_cap_type == "total":
             total_paid = Decimal(str(state.get('total_paid_all_time', 0)))
         else:
             # Invalid cap type - no cap applies
             return finalis_commissions, Decimal('0')
-
+    
         # Calculate available space under cap
-        available_space = max(Decimal('0'),
-                              cost_cap_amount_decimal - total_paid)
-
+        available_space = max(Decimal('0'), cost_cap_amount_decimal - total_paid)
+    
         # Calculate total amount we want to charge this deal
         total_to_charge_this_deal = advance_fees_created + finalis_commissions
-
+    
         if total_to_charge_this_deal <= available_space:
-            # Everything fits within the cap
+        # Everything fits within the cap
             commissions_after_cap = finalis_commissions
             amount_not_charged = Decimal('0')
         else:
             # We exceed the cap
             # Advance fees have priority (already created)
             # So we limit only the commissions
-            space_for_commissions = max(Decimal('0'),
-                                        available_space - advance_fees_created)
-            commissions_after_cap = min(finalis_commissions,
-                                        space_for_commissions)
-            amount_not_charged = finalis_commissions - commissions_after_cap
+            space_for_commissions = max(Decimal('0'), available_space - advance_fees_created)
+            commissions_after_cap = min(finalis_commissions, space_for_commissions)
+    
+        
+            amount_not_charged = implied_total_before_subscription - (advance_fees_created + commissions_after_cap)
+    
+        
+            amount_not_charged = max(Decimal('0'), amount_not_charged)
 
         return commissions_after_cap, amount_not_charged
 
@@ -299,7 +304,8 @@ class FinalisEngine:
         current_debt = Decimal(str(state['current_debt']))
 
         # STEP 1: Calculate Fixed Costs
-        finra_fee = self.calculate_finra_fee(total_for_calculations)
+        has_finra_fee = new_deal.get('has_finra_fee', True)  # Default True (backward compatible)
+        finra_fee = self.calculate_finra_fee(total_for_calculations, has_finra_fee)
         distribution_fee = self.calculate_distribution_fee(
             total_for_calculations, new_deal['is_distribution_fee_true'])
         sourcing_fee = self.calculate_sourcing_fee(
@@ -438,8 +444,12 @@ class FinalisEngine:
 
         # STEP 7b: Apply Cost Cap (if exists)
         finalis_commissions, amount_not_charged_due_to_cap = self.apply_cost_cap(
-            finalis_commissions_before_cap, contract, state,
-            advance_fees_created, new_deal['deal_date'])
+            finalis_commissions_before_cap, 
+            implied_total,  # ← NUEVO: pasar el implied_total original
+            contract, 
+            state,
+            advance_fees_created, 
+            new_deal['deal_date'])
 
         # STEP 8: Calculate Net Payout
         net_payout = self.calculate_net_payout(success_fees, debt_collected,
@@ -459,7 +469,9 @@ class FinalisEngine:
                 "external_retainer": self.to_money(external_retainer),
                 "external_retainer_deducted": is_external_retainer_deducted if has_external_retainer else None,
                 "total_deal_value": self.to_money(total_for_calculations),
-                "deal_date": new_deal['deal_date']
+                "deal_date": new_deal['deal_date'],
+                "has_finra_fee": has_finra_fee  
+
             },
             "calculations": {
                 "finra_fee":
@@ -598,8 +610,20 @@ class FinalisEngine:
 
         return result
 
-    def calculate_finra_fee(self, success_fees: Decimal) -> Decimal:
-        """STEP 1: Calculate FINRA/SIPC fee (0.4732%)"""
+    def calculate_finra_fee(self, success_fees: Decimal, has_finra_fee: bool = True) -> Decimal:
+        """
+        STEP 1: Calculate FINRA/SIPC fee (0.4732%)
+
+        Args:
+            success_fees: Deal success fees
+            has_finra_fee: Whether FINRA fee applies (default True for backward compatibility)
+
+        Returns:
+            FINRA fee amount (0 if exempt)
+        """
+        if not has_finra_fee:
+            return Decimal('0')
+
         return (success_fees * self.FINRA_RATE).quantize(
             Decimal('0.01'), rounding=ROUND_HALF_UP)
 

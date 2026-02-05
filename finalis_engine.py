@@ -46,7 +46,6 @@ class FinalisEngine:
             raise ValueError(
                 f"success_fees must be positive, got: {success_fees}")
 
-
         if external_retainer < 0:
             raise ValueError(
                 f"external_retainer cannot be negative, got: {external_retainer}"
@@ -129,13 +128,14 @@ class FinalisEngine:
                 preferred_rate = new_deal.get('preferred_rate')
                 if preferred_rate is None:
                     raise ValueError(
-                        "preferred_rate is required when has_preferred_rate=True")
+                        "preferred_rate is required when has_preferred_rate=True"
+                    )
 
                 preferred_rate_decimal = Decimal(str(preferred_rate))
                 if not (0 <= preferred_rate_decimal <= 1):
                     raise ValueError(
-                        f"preferred_rate must be between 0 and 1, got: {preferred_rate}")
-            
+                        f"preferred_rate must be between 0 and 1, got: {preferred_rate}"
+                    )
 
             # Validate PAYG constraints
             is_payg = contract.get('is_pay_as_you_go', False)
@@ -169,10 +169,9 @@ class FinalisEngine:
 
         return contract_year
 
-
-    def calculate_applicable_deferred(self, state: Dict[str, Any], 
-          contract_start_date: str,
-          deal_date: str) -> Decimal:
+    def calculate_applicable_deferred(self, state: Dict[str, Any],
+                                      contract_start_date: str,
+                                      deal_date: str) -> Decimal:
         """
         Calculate which deferred amount applies based on the current contract year.
     
@@ -188,13 +187,15 @@ class FinalisEngine:
         deferred_schedule = state.get('deferred_schedule')
 
         if deferred_schedule and len(deferred_schedule) > 0:
-        # Calculate current contract year
-            current_year = self.calculate_contract_year(contract_start_date, deal_date)
+            # Calculate current contract year
+            current_year = self.calculate_contract_year(
+                contract_start_date, deal_date)
 
             # Find deferred for this specific year
             for deferred_entry in deferred_schedule:
                 if deferred_entry.get('year') == current_year:
-                    amount = Decimal(str(deferred_entry.get('amount', 0)))  # ← DEFINIR PRIMERO
+                    amount = Decimal(str(deferred_entry.get(
+                        'amount', 0)))  # ← DEFINIR PRIMERO
                     return amount  # ← Usar la variable
 
             # If no deferred for this year, return 0
@@ -203,17 +204,16 @@ class FinalisEngine:
         # Fallback to legacy single deferred (backward compatible)
         legacy_deferred = state.get('deferred_subscription_fee', 0)
         return Decimal(str(legacy_deferred))
-    
 
-
-    
-
-    def apply_cost_cap(self, finalis_commissions: Decimal, 
-           implied_total_before_subscription: Decimal,  # NUEVO parámetro
-           contract: Dict[str, Any],
-           state: Dict[str, Any], 
-           advance_fees_created: Decimal,
-           deal_date: str) -> tuple[Decimal, Decimal]:
+    def apply_cost_cap(
+            self,
+            finalis_commissions: Decimal,
+            implied_total_before_subscription: Decimal,
+            contract: Dict[str, Any],
+            state: Dict[str, Any],
+            advance_fees_created: Decimal,
+            payg_arr_contribution: Decimal,  # ← NUEVO parámetro
+            deal_date: str) -> tuple[Decimal, Decimal]:
         """
         Apply cost cap limits to finalis commissions.
     
@@ -229,45 +229,60 @@ class FinalisEngine:
         Returns: (finalis_commissions_after_cap, amount_not_charged)
         """
         # Check if cost cap exists
-        cost_cap_type = contract.get('cost_cap_type')  # "annual", "total", or None
+        cost_cap_type = contract.get(
+            'cost_cap_type')  # "annual", "total", or None
         cost_cap_amount = contract.get('cost_cap_amount')
-    
+
         if cost_cap_type is None or cost_cap_amount is None:
-        # No cost cap - return original amount
+            # No cost cap - return original amount
             return finalis_commissions, Decimal('0')
-    
+
         cost_cap_amount_decimal = Decimal(str(cost_cap_amount))
-    
+
         # Get the appropriate tracking amount based on cap type
         if cost_cap_type == "annual":
-            total_paid = Decimal(str(state.get('total_paid_this_contract_year', 0)))
+            total_paid = Decimal(
+                str(state.get('total_paid_this_contract_year', 0)))
         elif cost_cap_type == "total":
             total_paid = Decimal(str(state.get('total_paid_all_time', 0)))
         else:
             # Invalid cap type - no cap applies
             return finalis_commissions, Decimal('0')
-    
+
         # Calculate available space under cap
-        available_space = max(Decimal('0'), cost_cap_amount_decimal - total_paid)
-    
+        available_space = max(Decimal('0'),
+                              cost_cap_amount_decimal - total_paid)
+
         # Calculate total amount we want to charge this deal
-        total_to_charge_this_deal = advance_fees_created + finalis_commissions
-    
+        # For PAYG: Include ARR contribution in the total
+        total_to_charge_this_deal = advance_fees_created + finalis_commissions + payg_arr_contribution
+
         if total_to_charge_this_deal <= available_space:
-        # Everything fits within the cap
+            # Everything fits within the cap
             commissions_after_cap = finalis_commissions
             amount_not_charged = Decimal('0')
         else:
             # We exceed the cap
-            # Advance fees have priority (already created)
-            # So we limit only the commissions
-            space_for_commissions = max(Decimal('0'), available_space - advance_fees_created)
-            commissions_after_cap = min(finalis_commissions, space_for_commissions)
-    
-        
-            amount_not_charged = implied_total_before_subscription - (advance_fees_created + commissions_after_cap)
-    
-        
+            # Priority order: 1) Advance fees, 2) ARR contribution (PAYG), 3) Finalis commissions
+            space_after_advance = max(Decimal('0'),
+                                      available_space - advance_fees_created)
+
+            # For PAYG: ARR contribution has priority over finalis commissions
+            if payg_arr_contribution > 0:
+                # PAYG case: ARR contribution fits first
+                space_after_arr = max(
+                    Decimal('0'), space_after_advance - payg_arr_contribution)
+                commissions_after_cap = min(finalis_commissions,
+                                            space_after_arr)
+            else:
+                # Non-PAYG case: Only finalis commissions
+                commissions_after_cap = min(finalis_commissions,
+                                            space_after_advance)
+
+            amount_not_charged = implied_total_before_subscription - (
+                advance_fees_created + payg_arr_contribution +
+                commissions_after_cap)
+
             amount_not_charged = max(Decimal('0'), amount_not_charged)
 
         return commissions_after_cap, amount_not_charged
@@ -287,7 +302,8 @@ class FinalisEngine:
         success_fees = Decimal(str(new_deal['success_fees']))
         external_retainer = Decimal(str(new_deal.get('external_retainer', 0)))
         has_external_retainer = new_deal.get('has_external_retainer', False)
-        is_external_retainer_deducted = new_deal.get('is_external_retainer_deducted', True)
+        is_external_retainer_deducted = new_deal.get(
+            'is_external_retainer_deducted', True)
 
         # Calculate total based on retainer type
         if has_external_retainer and is_external_retainer_deducted:
@@ -304,8 +320,10 @@ class FinalisEngine:
         current_debt = Decimal(str(state['current_debt']))
 
         # STEP 1: Calculate Fixed Costs
-        has_finra_fee = new_deal.get('has_finra_fee', True)  # Default True (backward compatible)
-        finra_fee = self.calculate_finra_fee(total_for_calculations, has_finra_fee)
+        has_finra_fee = new_deal.get(
+            'has_finra_fee', True)  # Default True (backward compatible)
+        finra_fee = self.calculate_finra_fee(total_for_calculations,
+                                             has_finra_fee)
         distribution_fee = self.calculate_distribution_fee(
             total_for_calculations, new_deal['is_distribution_fee_true'])
         sourcing_fee = self.calculate_sourcing_fee(
@@ -323,7 +341,7 @@ class FinalisEngine:
             contract.get('lehman_tiers'),
             accumulated_before,
             new_deal.get('has_preferred_rate', False),  # NUEVO
-            new_deal.get('preferred_rate')              # NUEVO
+            new_deal.get('preferred_rate')  # NUEVO
         )
 
         # Get contract type early (needed for credit logic)
@@ -332,13 +350,9 @@ class FinalisEngine:
         # STEP 3: Process Debt Collection (including deferred backend)
         # NEW: Calculate which deferred applies based on contract year
         deferred_backend = self.calculate_applicable_deferred(
-            state, 
-            contract.get('contract_start_date'),
-            new_deal['deal_date']
-        )
+            state, contract.get('contract_start_date'), new_deal['deal_date'])
         total_debt = current_debt + deferred_backend
         debt_collected = min(success_fees, total_debt)
-
 
         # Split collected debt between regular debt and deferred
         if debt_collected > 0:
@@ -395,9 +409,36 @@ class FinalisEngine:
             updated_payments = []
             contract_fully_prepaid = True  # PAYG siempre está "prepaid"
         else:
-            # Standard contracts: create advance fees normally
+            # Standard contracts: create advance fees, but respect cost cap
+            # First, calculate available space in cost cap
+            cost_cap_type = contract.get('cost_cap_type')
+            cost_cap_amount = contract.get('cost_cap_amount')
+
+            if cost_cap_type and cost_cap_amount:
+                # Cost cap exists - limit advance fees to available space
+                if cost_cap_type == "annual":
+                    total_paid = Decimal(
+                        str(state.get('total_paid_this_contract_year', 0)))
+                elif cost_cap_type == "total":
+                    total_paid = Decimal(
+                        str(state.get('total_paid_all_time', 0)))
+                else:
+                    total_paid = Decimal('0')
+
+                cost_cap_decimal = Decimal(str(cost_cap_amount))
+                available_space = max(Decimal('0'),
+                                      cost_cap_decimal - total_paid)
+
+                # Limit advance fees to available space
+                max_advance_allowed = min(implied_remaining_after_credit,
+                                          available_space)
+            else:
+                # No cost cap - use full implied
+                max_advance_allowed = implied_remaining_after_credit
+
+            # Create advance fees up to the allowed amount
             advance_fees_created, updated_payments, contract_fully_prepaid = self.process_advance_fees(
-                implied_remaining_after_credit, future_fees)
+                max_advance_allowed, future_fees)
 
         # STEP 7: Calculate Finalis Commissions
         implied_remaining_after_advance = implied_remaining_after_credit - advance_fees_created
@@ -405,7 +446,8 @@ class FinalisEngine:
         if is_payg:
             # Pay-As-You-Go: Check if ARR is already covered
             arr = Decimal(str(contract.get('annual_subscription', 0)))
-            payg_accumulated = Decimal(str(state.get('payg_commissions_accumulated', 0)))
+            payg_accumulated = Decimal(
+                str(state.get('payg_commissions_accumulated', 0)))
 
             # Calculate how much of THIS deal's implied goes to ARR vs Finalis
             remaining_arr = max(Decimal('0'), arr - payg_accumulated)
@@ -414,8 +456,18 @@ class FinalisEngine:
                 # All implied goes to ARR (not Finalis yet)
                 payg_arr_contribution = implied_total
                 finalis_commissions_before_cap = Decimal('0')
-                new_commissions_mode = False
-                entered_commissions_mode = False
+
+                # Check if we completed EXACTLY the ARR
+                new_accumulated = payg_accumulated + implied_total
+                if new_accumulated >= arr:
+                    # Completed ARR exactly - enter commissions mode
+                    new_commissions_mode = True
+                    entered_commissions_mode = True
+                else:
+                    # Still accumulating ARR - not in commissions mode yet
+                    new_commissions_mode = False
+                    entered_commissions_mode = False
+
             elif payg_accumulated >= arr:
                 # ARR already covered - all implied becomes Finalis commissions
                 payg_arr_contribution = Decimal('0')
@@ -449,20 +501,22 @@ class FinalisEngine:
 
         # STEP 7b: Apply Cost Cap (if exists)
         finalis_commissions, amount_not_charged_due_to_cap = self.apply_cost_cap(
-            finalis_commissions_before_cap, 
-            implied_total,  # ← NUEVO: pasar el implied_total original
-            contract, 
-            state,
-            advance_fees_created, 
-            new_deal['deal_date'])
+            finalis_commissions_before_cap, implied_total, contract, state,
+            advance_fees_created, payg_arr_contribution, new_deal['deal_date'])
+
+        # CRITICAL FIX: Recalculate not_charged considering ALL charges
+        # This handles the case where advance fees consume cap space
+        total_charged = advance_fees_created + payg_arr_contribution + finalis_commissions
+        amount_not_charged_due_to_cap = max(Decimal('0'),
+                                            implied_total - total_charged)
 
         # STEP 8: Calculate Net Payout
         net_payout = self.calculate_net_payout(success_fees, debt_collected,
-               finra_fee, distribution_fee,
-               sourcing_fee,
-               advance_fees_created,
-               finalis_commissions,
-               payg_arr_contribution)  
+                                               finra_fee, distribution_fee,
+                                               sourcing_fee,
+                                               advance_fees_created,
+                                               finalis_commissions,
+                                               payg_arr_contribution)
 
         # STEP 9: Construct Updated State
         updated_accumulated = accumulated_before + total_for_calculations
@@ -470,14 +524,21 @@ class FinalisEngine:
         # Build output - all monetary values with exactly 2 decimals
         result = {
             "deal_summary": {
-                "deal_name": new_deal['deal_name'],
-                "success_fees": self.to_money(success_fees),
-                "external_retainer": self.to_money(external_retainer),
-                "external_retainer_deducted": is_external_retainer_deducted if has_external_retainer else None,
-                "total_deal_value": self.to_money(total_for_calculations),
-                "deal_date": new_deal['deal_date'],
-                "has_finra_fee": has_finra_fee  
-
+                "deal_name":
+                new_deal['deal_name'],
+                "success_fees":
+                self.to_money(success_fees),
+                "external_retainer":
+                self.to_money(external_retainer),
+                "external_retainer_deducted":
+                is_external_retainer_deducted
+                if has_external_retainer else None,
+                "total_deal_value":
+                self.to_money(total_for_calculations),
+                "deal_date":
+                new_deal['deal_date'],
+                "has_finra_fee":
+                has_finra_fee
             },
             "calculations": {
                 "finra_fee":
@@ -506,18 +567,26 @@ class FinalisEngine:
                 self.to_money(net_payout)
             },
             "state_changes": {
-                "initial_credit": self.to_money(current_credit),
-                "final_credit": self.to_money(credit_remaining),
-                "initial_debt": self.to_money(current_debt),
-                "final_debt": self.to_money(remaining_debt),
-                "initial_deferred": self.to_money(deferred_backend),
-                "final_deferred": self.to_money(remaining_deferred),
-                "contract_year": self.calculate_contract_year(
-                    contract.get('contract_start_date'), 
-                    new_deal['deal_date']
-                ) if contract.get('contract_start_date') else None,
-                "contract_fully_prepaid": contract_fully_prepaid,
-                "entered_commissions_mode": entered_commissions_mode
+                "initial_credit":
+                self.to_money(current_credit),
+                "final_credit":
+                self.to_money(credit_remaining),
+                "initial_debt":
+                self.to_money(current_debt),
+                "final_debt":
+                self.to_money(remaining_debt),
+                "initial_deferred":
+                self.to_money(deferred_backend),
+                "final_deferred":
+                self.to_money(remaining_deferred),
+                "contract_year":
+                self.calculate_contract_year(
+                    contract.get('contract_start_date'), new_deal['deal_date'])
+                if contract.get('contract_start_date') else None,
+                "contract_fully_prepaid":
+                contract_fully_prepaid,
+                "entered_commissions_mode":
+                entered_commissions_mode
             },
             "updated_future_payments": updated_payments,
             "updated_contract_state": {
@@ -547,36 +616,45 @@ class FinalisEngine:
             arr = Decimal(str(contract.get('annual_subscription', 0)))
             # NEW: Accumulate ARR contribution, not just finalis_commissions
             payg_total_accumulated = Decimal(
-                str(state.get('payg_commissions_accumulated', 0))) + payg_arr_contribution + finalis_commissions
+                str(state.get(
+                    'payg_commissions_accumulated',
+                    0))) + payg_arr_contribution + finalis_commissions
 
             result['payg_tracking'] = {
-                "arr_target": self.to_money(arr),
-                "arr_contribution_this_deal": self.to_money(payg_arr_contribution),
-                "finalis_commissions_this_deal": self.to_money(finalis_commissions),
-                "commissions_accumulated": self.to_money(payg_total_accumulated),
-                "remaining_to_cover_arr": self.to_money(max(Decimal('0'), arr - payg_total_accumulated)),
-                "arr_coverage_percentage": round(
-                    float((payg_total_accumulated / arr * 100)) if arr > 0 else 0, 2),
+                "arr_target":
+                self.to_money(arr),
+                "arr_contribution_this_deal":
+                self.to_money(payg_arr_contribution),
+                "finalis_commissions_this_deal":
+                self.to_money(finalis_commissions),
+                "commissions_accumulated":
+                self.to_money(payg_total_accumulated),
+                "remaining_to_cover_arr":
+                self.to_money(max(Decimal('0'), arr - payg_total_accumulated)),
+                "arr_coverage_percentage":
+                round(
+                    float((payg_total_accumulated / arr *
+                           100)) if arr > 0 else 0, 2),
             }
 
-            result['updated_contract_state']['payg_commissions_accumulated'] = self.to_money(payg_total_accumulated)
-
-            
+            result['updated_contract_state'][
+                'payg_commissions_accumulated'] = self.to_money(
+                    payg_total_accumulated)
 
         # NEW: If deferred_schedule exists, update it
         if state.get('deferred_schedule'):
             current_year = self.calculate_contract_year(
-                contract.get('contract_start_date'),
-                new_deal['deal_date']
-            )
+                contract.get('contract_start_date'), new_deal['deal_date'])
 
             updated_schedule = []
             for entry in state['deferred_schedule']:
                 if entry['year'] == current_year:
                     # Update this year's deferred with remaining amount
                     updated_schedule.append({
-                        "year": entry['year'],
-                        "amount": self.to_money(remaining_deferred)
+                        "year":
+                        entry['year'],
+                        "amount":
+                        self.to_money(remaining_deferred)
                     })
                 else:
                     # Keep other years unchanged
@@ -585,11 +663,14 @@ class FinalisEngine:
                         "amount": entry['amount']
                     })
 
-            result['updated_contract_state']['deferred_schedule'] = updated_schedule
+            result['updated_contract_state'][
+                'deferred_schedule'] = updated_schedule
 
         return result
 
-    def calculate_finra_fee(self, success_fees: Decimal, has_finra_fee: bool = True) -> Decimal:
+    def calculate_finra_fee(self,
+                            success_fees: Decimal,
+                            has_finra_fee: bool = True) -> Decimal:
         """
         STEP 1: Calculate FINRA/SIPC fee (0.4732%)
 
@@ -624,13 +705,17 @@ class FinalisEngine:
                 Decimal('0.01'), rounding=ROUND_HALF_UP)
         return Decimal('0')
 
-    def calculate_implied(self, success_fees: Decimal, is_deal_exempt: bool,
-          rate_type: str, fixed_rate: Optional[float],
-          lehman_tiers: Optional[List[Dict]],
-          accumulated_before: Decimal,
-          has_preferred_rate: bool = False,          # NUEVO
-          preferred_rate: Optional[float] = None    # NUEVO
-          ) -> Decimal:
+    def calculate_implied(
+            self,
+            success_fees: Decimal,
+            is_deal_exempt: bool,
+            rate_type: str,
+            fixed_rate: Optional[float],
+            lehman_tiers: Optional[List[Dict]],
+            accumulated_before: Decimal,
+            has_preferred_rate: bool = False,  # NUEVO
+            preferred_rate: Optional[float] = None  # NUEVO
+    ) -> Decimal:
         """
         STEP 2: Calculate IMPLIED (BD Cost)
         Four modes (in priority order):
@@ -652,7 +737,7 @@ class FinalisEngine:
     # MODE 3: Lehman Progressive Tiers
         if rate_type == 'lehman' and lehman_tiers:
             return self.calculate_lehman_implied(success_fees, lehman_tiers,
-                                 accumulated_before)
+                                                 accumulated_before)
 
     # MODE 4: Fixed Rate
         if fixed_rate is not None:
@@ -660,9 +745,6 @@ class FinalisEngine:
                 Decimal('0.01'), rounding=ROUND_HALF_UP)
 
         raise ValueError("Invalid rate configuration")
-
-
-    
 
     def calculate_lehman_implied(self, success_fees: Decimal,
                                  lehman_tiers: List[Dict],
@@ -817,12 +899,17 @@ class FinalisEngine:
 
         return advance_fees_created, updated_payments, contract_fully_prepaid
 
-    def calculate_net_payout(self, success_fees: Decimal,
-                             debt_collected: Decimal, finra_fee: Decimal,
-                             distribution_fee: Decimal, sourcing_fee: Decimal,
-                             advance_fees: Decimal,
-                             finalis_commissions: Decimal,
-                             payg_arr_contribution: Decimal = Decimal('0')) -> Decimal:
+    def calculate_net_payout(
+        self,
+        success_fees: Decimal,
+        debt_collected: Decimal,
+        finra_fee: Decimal,
+        distribution_fee: Decimal,
+        sourcing_fee: Decimal,
+        advance_fees: Decimal,
+        finalis_commissions: Decimal,
+        payg_arr_contribution: Decimal = Decimal('0')
+    ) -> Decimal:
         """
         STEP 8: Calculate net payout to client.
         For PAYG: Also deducts the ARR contribution (implied that goes toward annual subscription)
@@ -835,7 +922,7 @@ class FinalisEngine:
         net_payout -= advance_fees
         net_payout -= finalis_commissions
         net_payout -= payg_arr_contribution  # NEW: Deduct PAYG ARR contribution
-    
+
         return net_payout.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
